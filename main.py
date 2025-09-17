@@ -1,5 +1,7 @@
 import os
 import logging
+import json
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -13,42 +15,39 @@ from telegram.ext import (
 )
 from collections import defaultdict
 import datetime
+import pytz
 
-# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-
 LOGGER = logging.getLogger(__name__)
 
-# Environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 MANAGER_ID = int(os.environ.get("MANAGER_ID", 0))
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002061234567")
 
-# States for ConversationHandler
 MAIN_MENU, EDIT_MENU, SCHEDULE_MENU, SETTINGS_MENU, \
     NOTIFICATIONS_MENU, CHANNELS_MENU, MESSAGES_MENU, RIGHTS_MENU, \
-    ADD_TEXT, ADD_POST, EDIT_TITLE, EDIT_CONTENT, SCHEDULE_CUSTOM = range(13)
+    ADD_TEXT, ADD_POST, EDIT_TEXT_PROMPT, EDIT_CONTENT_PROMPT, SCHEDULE_CUSTOM_PROMPT, \
+    EDIT_WELCOME_MESSAGE, EDIT_REJECT_MESSAGE, CLEAR_USER_PROMPT = range(16)
 
-# In-memory storage (will be reset on bot restart)
 user_data = defaultdict(dict)
 texts = {}
 posts = {}
 scheduled_jobs = {}
 user_count = set()
 bot_config = {
-    'welcome_message': 'أهلاً بك في البوت! يمكنك التواصل مع المدير عبر إرسال رسالتك مباشرة.',
+    'welcome_message': 'أهلاً بك! يمكنك التواصل مع المدير عبر إرسال رسالتك مباشرة.',
     'media_rejection_message': 'عذراً، لا يمكنني التعامل مع هذا النوع من الوسائط.',
     'protection_enabled': False,
     'add_rights': False,
     'add_buttons_to_welcome': False,
-    'notifications': {'publish': False, 'new_user': False, 'auto_publish': False},
-    'linked_channels': {}
+    'notifications': {'publish': True, 'new_user': True, 'auto_publish': True},
+    'linked_channels': {},
+    'auto_reply_enabled': False
 }
 
 def get_main_menu_keyboard():
-    """Generates the main menu keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 نشر الآن", callback_data='publish_now'),
          InlineKeyboardButton("نشر تلقائي", callback_data='publish_auto')],
@@ -64,7 +63,6 @@ def get_main_menu_keyboard():
     ])
 
 def get_edit_menu_keyboard():
-    """Generates the edit sub-menu keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تعديل عنوان نص", callback_data='edit_text_title')],
         [InlineKeyboardButton("✏️ تعديل محتوى نص", callback_data='edit_text_content')],
@@ -73,7 +71,6 @@ def get_edit_menu_keyboard():
     ])
 
 def get_schedule_menu_keyboard():
-    """Generates the schedule sub-menu keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⏰ جدولة بعد ساعة", callback_data='schedule_hour')],
         [InlineKeyboardButton("⏰ جدولة بعد يوم", callback_data='schedule_day')],
@@ -82,19 +79,19 @@ def get_schedule_menu_keyboard():
     ])
 
 def get_settings_menu_keyboard():
-    """Generates the settings sub-menu keyboard."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔔 إشعارات", callback_data='notifications_menu')],
-        [InlineKeyboardButton("🌐 القنوات المربوطة", callback_data='channels_menu')],
+        [InlineKeyboardButton(f"🔔 إشعارات {'✅' if bot_config['notifications']['publish'] else '❌'}", callback_data='notifications_menu')],
+        [InlineKeyboardButton(f"🌐 القنوات المربوطة ({len(bot_config['linked_channels'])})", callback_data='channels_menu')],
         [InlineKeyboardButton("أزرار الرسالة", callback_data='messages_menu')],
         [InlineKeyboardButton("مسح الذاكرة المؤقتة للمستخدمين", callback_data='clear_users_cache')],
-        [InlineKeyboardButton("مسح الذاكرة المؤقتة لمستخدم", callback_data='clear_user_cache')],
+        [InlineKeyboardButton("مسح الذاكرة المؤقتة لمستخدم", callback_data='clear_user_cache_prompt')],
+        [InlineKeyboardButton(f"حماية البوت {'✅' if bot_config['protection_enabled'] else '❌'}", callback_data='toggle_protection')],
+        [InlineKeyboardButton(f"إنشاء رد تلقائي {'✅' if bot_config['auto_reply_enabled'] else '❌'}", callback_data='toggle_auto_reply')],
         [InlineKeyboardButton("الحقوق", callback_data='rights_menu')],
         [InlineKeyboardButton("⬅️ رجوع", callback_data='back_to_main')],
     ])
 
 def get_add_again_keyboard(add_type):
-    """Generates the 'add again' and 'back' keyboard."""
     if add_type == 'text':
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("إضافة نص مرة ثانية", callback_data='add_text_again')],
@@ -107,7 +104,6 @@ def get_add_again_keyboard(add_type):
         ])
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point for the bot, displays main menu and pins the message."""
     user = update.effective_user
     if user.id == MANAGER_ID:
         if update.message:
@@ -122,7 +118,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                     disable_notification=True
                 )
             except Exception as e:
-                LOGGER.error(f"Failed to pin message: {e}")
                 await update.message.reply_text("فشل تثبيت الرسالة، يرجى التأكد من صلاحيات البوت.")
         return MAIN_MENU
     else:
@@ -132,20 +127,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles callback queries from InlineKeyboard buttons."""
     query = update.callback_query
     await query.answer()
     
-    # Back button logic
-    if query.data == 'back_to_main':
-        await query.edit_message_text(
-            text="<b>📋 لوحة التحكم الخاصة بالمدير ابو سيف بن ذي يزن </b>",
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-        return MAIN_MENU
+    if query.data.startswith('back_'):
+        if query.data == 'back_to_main':
+            await query.edit_message_text(
+                text="<b>📋 لوحة التحكم الخاصة بالمدير ابو سيف بن ذي يزن </b>",
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+            return MAIN_MENU
     
-    # "Add again" logic
     elif query.data == 'add_text_again':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
         return ADD_TEXT
@@ -153,35 +146,67 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("الرجاء إرسال المنشور (صورة، فيديو، نص) الذي تريد إضافته:")
         return ADD_POST
     
-    # --- Main Menu Buttons Logic ---
-    if query.data == 'publish_now':
-        await query.edit_message_text("✅ تم النشر بنجاح.")
+    elif query.data == 'publish_now':
+        if not posts and not texts:
+            await query.edit_message_text("لا توجد منشورات أو نصوص متاحة للنشر.")
+            return MAIN_MENU
+        try:
+            for post_id, post_content in posts.items():
+                if post_content['type'] == 'text':
+                    await context.bot.send_message(chat_id=CHANNEL_ID, text=post_content['content'])
+                elif post_content['type'] == 'photo':
+                    await context.bot.send_photo(chat_id=CHANNEL_ID, photo=post_content['file_id'], caption=post_content['caption'])
+            await query.edit_message_text("✅ تم النشر بنجاح.")
+        except Exception as e:
+            await query.edit_message_text(f"حدث خطأ أثناء النشر: {e}")
+
     elif query.data == 'add_text':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
         return ADD_TEXT
     elif query.data == 'add_post':
         await query.edit_message_text("الرجاء إرسال المنشور (صورة، فيديو، نص) الذي تريد إضافته:")
         return ADD_POST
+
     elif query.data == 'edit_menu':
         await query.edit_message_text("📝 لوحة تعديل النصوص والمنشورات:", reply_markup=get_edit_menu_keyboard())
         return EDIT_MENU
+    
     elif query.data == 'delete_data':
         texts.clear()
         posts.clear()
         await query.edit_message_text("❌ تم حذف جميع النصوص والمنشورات المؤقتة.")
+    
     elif query.data == 'schedule_menu':
         await query.edit_message_text("📅 لوحة جدولة المنشورات:", reply_markup=get_schedule_menu_keyboard())
         return SCHEDULE_MENU
+    
     elif query.data == 'show_stats':
         await query.edit_message_text(f"📊 إحصائيات:\n\n👥 عدد الأعضاء: {len(user_count)}")
+    
     elif query.data == 'settings_menu':
         await query.edit_message_text("⚙️ لوحة الإعدادات:", reply_markup=get_settings_menu_keyboard())
         return SETTINGS_MENU
 
+    elif query.data == 'edit_text_content':
+        await query.edit_message_text("الرجاء إرسال معرف النص الذي تريد تعديل محتواه:")
+        return EDIT_CONTENT_PROMPT
+
+    elif query.data == 'toggle_protection':
+        bot_config['protection_enabled'] = not bot_config['protection_enabled']
+        await query.edit_message_text(f"حماية البوت الآن: {'✅ مفعل' if bot_config['protection_enabled'] else '❌ غير مفعل'}", reply_markup=get_settings_menu_keyboard())
+    elif query.data == 'toggle_auto_reply':
+        bot_config['auto_reply_enabled'] = not bot_config['auto_reply_enabled']
+        await query.edit_message_text(f"الرد التلقائي الآن: {'✅ مفعل' if bot_config['auto_reply_enabled'] else '❌ غير مفعل'}", reply_markup=get_settings_menu_keyboard())
+    elif query.data == 'clear_users_cache':
+        user_data.clear()
+        await query.edit_message_text("✅ تم مسح الذاكرة المؤقتة لجميع المستخدمين.", reply_markup=get_settings_menu_keyboard())
+    elif query.data == 'clear_user_cache_prompt':
+        await query.edit_message_text("الرجاء إرسال معرف المستخدم الذي تريد مسح بياناته:")
+        return CLEAR_USER_PROMPT
+    
     return MAIN_MENU
 
-async def add_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles adding a text from the manager."""
+async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text_content = update.message.text
     text_id = len(texts) + 1
     texts[text_id] = text_content
@@ -189,8 +214,7 @@ async def add_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("هل تريد إضافة نص آخر؟", reply_markup=get_add_again_keyboard('text'))
     return MAIN_MENU
 
-async def add_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles adding a post (text, photo, etc.) from the manager."""
+async def add_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     post_id = len(posts) + 1
     if update.message.text:
         posts[post_id] = {'type': 'text', 'content': update.message.text}
@@ -203,44 +227,102 @@ async def add_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("هل تريد إضافة منشور آخر؟", reply_markup=get_add_again_keyboard('post'))
     return MAIN_MENU
 
+async def edit_content_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        text_id = int(update.message.text)
+        if text_id in texts:
+            context.user_data['edit_id'] = text_id
+            await update.message.reply_text(f"أرسل المحتوى الجديد للنص رقم {text_id}:")
+            return EDIT_CONTENT_PROMPT
+        else:
+            await update.message.reply_text("المعرف غير موجود. الرجاء إرسال معرف صالح.")
+            return EDIT_CONTENT_PROMPT
+    except ValueError:
+        await update.message.reply_text("الرجاء إرسال رقم المعرف فقط.")
+        return EDIT_CONTENT_PROMPT
+    
+async def update_content_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text_id = context.user_data.get('edit_id')
+    if text_id:
+        texts[text_id] = update.message.text
+        await update.message.reply_text(f"✅ تم تحديث محتوى النص رقم {text_id}.")
+        del context.user_data['edit_id']
+    else:
+        await update.message.reply_text("حدث خطأ. الرجاء المحاولة مرة أخرى من القائمة الرئيسية.")
+    return MAIN_MENU
+
+async def clear_user_cache_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        user_to_clear = int(update.message.text)
+        if user_to_clear in user_data:
+            del user_data[user_to_clear]
+            await update.message.reply_text(f"✅ تم مسح الذاكرة المؤقتة للمستخدم {user_to_clear}.", reply_markup=get_settings_menu_keyboard())
+        else:
+            await update.message.reply_text("المستخدم غير موجود في الذاكرة المؤقتة.", reply_markup=get_settings_menu_keyboard())
+    except ValueError:
+        await update.message.reply_text("الرجاء إرسال رقم المعرف فقط.", reply_markup=get_settings_menu_keyboard())
+    return MAIN_MENU
+
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles messages from regular users."""
     user_id = update.effective_user.id
     user_count.add(user_id)
-    await update.message.reply_text(bot_config['welcome_message'])
+
+    if bot_config['auto_reply_enabled']:
+        query = update.message.text
+        API_KEY = ""
+        API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [{"text": query}]
+                }
+            ],
+            "tools": [{"google_search": {}}]
+        }
+
+        try:
+            response = requests.post(API_URL, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("candidates") and result["candidates"][0].get("content"):
+                ai_response = result["candidates"][0]["content"]["parts"][0]["text"]
+                await update.message.reply_text(ai_response)
+            else:
+                await update.message.reply_text("عذراً، لم أتمكن من إنشاء رد تلقائي الآن. يرجى المحاولة لاحقاً.")
+        except Exception as e:
+            await update.message.reply_text("حدث خطأ أثناء معالجة طلبك.")
+    else:
+        await update.message.reply_text(bot_config['welcome_message'])
 
 async def handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles media messages from regular users."""
     user_id = update.effective_user.id
     user_count.add(user_id)
     await update.message.reply_text(bot_config['media_rejection_message'])
 
-
 def main() -> None:
-    """Start the bot."""
     if not TELEGRAM_BOT_TOKEN or not MANAGER_ID:
-        LOGGER.error("TELEGRAM_BOT_TOKEN or MANAGER_ID environment variable is not set.")
         return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Conversation handler for manager's menu
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
             MAIN_MENU: [CallbackQueryHandler(handle_callback)],
-            ADD_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_text)],
-            ADD_POST: [MessageHandler(filters.ALL & ~filters.COMMAND, add_post)],
-            EDIT_MENU: [CallbackQueryHandler(handle_callback, pattern='^back_to_main$')],
-            SCHEDULE_MENU: [CallbackQueryHandler(handle_callback, pattern='^back_to_main$')],
-            SETTINGS_MENU: [CallbackQueryHandler(handle_callback, pattern='^back_to_main$')],
+            ADD_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_text_handler)],
+            ADD_POST: [MessageHandler(filters.ALL & ~filters.COMMAND, add_post_handler)],
+            EDIT_MENU: [CallbackQueryHandler(handle_callback)],
+            SCHEDULE_MENU: [CallbackQueryHandler(handle_callback)],
+            SETTINGS_MENU: [CallbackQueryHandler(handle_callback)],
+            EDIT_CONTENT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_content_prompt_handler)],
+            CLEAR_USER_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, clear_user_cache_handler)],
         },
         fallbacks=[CommandHandler("start", start_command)],
     )
 
     application.add_handler(conv_handler)
     
-    # Message handlers for regular users
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(user_id=~MANAGER_ID),
         handle_user_message
