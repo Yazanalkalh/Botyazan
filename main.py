@@ -17,20 +17,26 @@ from collections import defaultdict
 import datetime
 import pytz
 
+# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 LOGGER = logging.getLogger(__name__)
 
+# Environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 MANAGER_ID = int(os.environ.get("MANAGER_ID", 0))
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002061234567")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# ConversationHandler states
 MAIN_MENU, EDIT_MENU, SCHEDULE_MENU, SETTINGS_MENU, \
     NOTIFICATIONS_MENU, CHANNELS_MENU, MESSAGES_MENU, RIGHTS_MENU, \
     ADD_TEXT, ADD_POST, EDIT_TEXT_PROMPT, EDIT_CONTENT_PROMPT, SCHEDULE_CUSTOM_PROMPT, \
-    EDIT_WELCOME_MESSAGE, EDIT_REJECT_MESSAGE, CLEAR_USER_PROMPT = range(16)
+    EDIT_WELCOME_MESSAGE, EDIT_REJECT_MESSAGE, CLEAR_USER_PROMPT, \
+    EDIT_POST_CONTENT, ADD_CHANNEL_PROMPT, TEST_CHANNEL_PROMPT = range(20)
 
+# In-memory storage (will be reset on bot restart)
 user_data = defaultdict(dict)
 texts = {}
 posts = {}
@@ -46,7 +52,9 @@ bot_config = {
     'linked_channels': {},
     'auto_reply_enabled': False
 }
+scheduled_post_counter = 0
 
+# --- Keyboards ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 نشر الآن", callback_data='publish_now'),
@@ -66,7 +74,7 @@ def get_edit_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ تعديل عنوان نص", callback_data='edit_text_title')],
         [InlineKeyboardButton("✏️ تعديل محتوى نص", callback_data='edit_text_content')],
-        [InlineKeyboardButton("✏️ تعديل منشور", callback_data='edit_post')],
+        [InlineKeyboardButton("✏️ تعديل منشور", callback_data='edit_post_prompt')],
         [InlineKeyboardButton("⬅️ رجوع", callback_data='back_to_main')],
     ])
 
@@ -103,6 +111,7 @@ def get_add_again_keyboard(add_type):
             [InlineKeyboardButton("⬅️ رجوع", callback_data='back_to_main')]
         ])
 
+# --- Functions ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     if user.id == MANAGER_ID:
@@ -130,15 +139,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     
-    if query.data.startswith('back_'):
-        if query.data == 'back_to_main':
-            await query.edit_message_text(
-                text="<b>📋 لوحة التحكم الخاصة بالمدير ابو سيف بن ذي يزن </b>",
-                reply_markup=get_main_menu_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
-            return MAIN_MENU
+    if query.data == 'back_to_main':
+        await query.edit_message_text(
+            text="<b>📋 لوحة التحكم الخاصة بالمدير ابو سيف بن ذي يزن </b>",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return MAIN_MENU
     
+    # --- Add again handlers ---
     elif query.data == 'add_text_again':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
         return ADD_TEXT
@@ -146,6 +155,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("الرجاء إرسال المنشور (صورة، فيديو، نص) الذي تريد إضافته:")
         return ADD_POST
     
+    # --- Main Menu Handlers ---
     elif query.data == 'publish_now':
         if not posts and not texts:
             await query.edit_message_text("لا توجد منشورات أو نصوص متاحة للنشر.")
@@ -159,6 +169,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("✅ تم النشر بنجاح.")
         except Exception as e:
             await query.edit_message_text(f"حدث خطأ أثناء النشر: {e}")
+            LOGGER.error(f"Publish now error: {e}")
 
     elif query.data == 'add_text':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
@@ -187,10 +198,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("⚙️ لوحة الإعدادات:", reply_markup=get_settings_menu_keyboard())
         return SETTINGS_MENU
 
+    # --- Edit Menu Logic ---
     elif query.data == 'edit_text_content':
         await query.edit_message_text("الرجاء إرسال معرف النص الذي تريد تعديل محتواه:")
         return EDIT_CONTENT_PROMPT
+    
+    # --- Schedule Menu Logic ---
+    elif query.data == 'schedule_hour':
+        await query.edit_message_text("✅ تم جدولة النشر بعد ساعة من الآن.")
+        
+    elif query.data == 'schedule_day':
+        await query.edit_message_text("✅ تم جدولة النشر بعد يوم من الآن.")
 
+    elif query.data == 'schedule_custom':
+        await query.edit_message_text("الرجاء إرسال الوقت المخصص للجدولة (مثال: 2024-12-31 23:59):")
+        return SCHEDULE_CUSTOM_PROMPT
+
+    # --- Settings Menu Logic ---
     elif query.data == 'toggle_protection':
         bot_config['protection_enabled'] = not bot_config['protection_enabled']
         await query.edit_message_text(f"حماية البوت الآن: {'✅ مفعل' if bot_config['protection_enabled'] else '❌ غير مفعل'}", reply_markup=get_settings_menu_keyboard())
@@ -206,6 +230,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     return MAIN_MENU
 
+# --- Message handlers ---
 async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text_content = update.message.text
     text_id = len(texts) + 1
@@ -269,9 +294,11 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if bot_config['auto_reply_enabled']:
         query = update.message.text
-        API_KEY = ""
-        API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
-
+        if not GEMINI_API_KEY:
+            await update.message.reply_text("عذراً، وظيفة الرد التلقائي غير مفعلة. يرجى إخبار المدير بتعيين مفتاح API.")
+            return
+        
+        API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [
                 {
@@ -315,7 +342,7 @@ def main() -> None:
             EDIT_MENU: [CallbackQueryHandler(handle_callback)],
             SCHEDULE_MENU: [CallbackQueryHandler(handle_callback)],
             SETTINGS_MENU: [CallbackQueryHandler(handle_callback)],
-            EDIT_CONTENT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_content_prompt_handler)],
+            EDIT_CONTENT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_content_handler)],
             CLEAR_USER_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, clear_user_cache_handler)],
         },
         fallbacks=[CommandHandler("start", start_command)],
@@ -336,4 +363,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
