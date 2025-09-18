@@ -112,6 +112,52 @@ def get_add_again_keyboard(add_type):
         ])
 
 # --- Functions ---
+
+# وظيفة لإعادة توجيه رسائل المستخدمين للمدير
+async def forward_user_message_to_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    
+    # Store user data for reply functionality
+    user_data[MANAGER_ID]['current_user_id'] = user_id
+    
+    forward_message_text = (
+        f"رسالة جديدة من المستخدم: {user_name} ({user_id})\n\n"
+        f"{update.message.text}"
+    )
+
+    # إرسال الرسالة إلى المدير مع خيار الرد المباشر
+    await context.bot.send_message(
+        chat_id=MANAGER_ID,
+        text=forward_message_text,
+        reply_markup=ForceReply(selective=True)
+    )
+    
+    # إرسال رسالة ترحيب للمستخدم
+    await update.message.reply_text(bot_config['welcome_message'])
+
+# وظيفة للرد على رسائل المستخدمين من قبل المدير
+async def handle_manager_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # التحقق من أن المستخدم الذي يرد هو المدير
+    if update.effective_user.id != MANAGER_ID:
+        return
+        
+    reply_text = update.message.text
+    # الحصول على معرف المستخدم الذي يتم الرد عليه
+    target_user_id = user_data[MANAGER_ID].get('current_user_id')
+    
+    if target_user_id:
+        try:
+            await context.bot.send_message(chat_id=target_user_id, text=reply_text)
+            await update.message.reply_text("✅ تم إرسال الرد بنجاح إلى المستخدم.")
+            # مسح البيانات بعد الرد
+            del user_data[MANAGER_ID]['current_user_id']
+        except Exception as e:
+            await update.message.reply_text("❌ فشل إرسال الرد، ربما قام المستخدم بحظر البوت.")
+            LOGGER.error(f"Failed to send reply to user {target_user_id}: {e}")
+    else:
+        await update.message.reply_text("❌ لم يتم العثور على مستخدم للرد عليه.")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     if user.id == MANAGER_ID:
@@ -131,9 +177,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return MAIN_MENU
     else:
         user_count.add(user.id)
-        if update.message:
-            await update.message.reply_text(bot_config['welcome_message'])
+        # إذا لم يكن الرد التلقائي مفعلا، يتم إعادة توجيه الرسالة
+        if not bot_config['auto_reply_enabled']:
+            return ConversationHandler.END
+        # وإلا، يتم إرسال رسالة ترحيب
+        await update.message.reply_text(bot_config['welcome_message'])
         return ConversationHandler.END
+
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -170,6 +220,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             await query.edit_message_text(f"حدث خطأ أثناء النشر: {e}")
             LOGGER.error(f"Publish now error: {e}")
+            return MAIN_MENU
+        return MAIN_MENU
+    
+    elif query.data == 'publish_auto':
+        await query.edit_message_text("✅ تم تفعيل النشر التلقائي. (وظيفة تحت التطوير)")
+        return MAIN_MENU
+    
+    elif query.data == 'add_channel_post':
+        await query.edit_message_text("✅ تم تفعيل إضافة منشور للقناة. (وظيفة تحت التطوير)")
+        return MAIN_MENU
+        
+    elif query.data == 'publish_sorted':
+        await query.edit_message_text("✅ سيتم نشر المنشورات مرتبة. (وظيفة تحت التطوير)")
+        return MAIN_MENU
 
     elif query.data == 'add_text':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
@@ -186,6 +250,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         texts.clear()
         posts.clear()
         await query.edit_message_text("❌ تم حذف جميع النصوص والمنشورات المؤقتة.")
+        return MAIN_MENU
     
     elif query.data == 'schedule_menu':
         await query.edit_message_text("📅 لوحة جدولة المنشورات:", reply_markup=get_schedule_menu_keyboard())
@@ -193,37 +258,73 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     elif query.data == 'show_stats':
         await query.edit_message_text(f"📊 إحصائيات:\n\n👥 عدد الأعضاء: {len(user_count)}")
+        return MAIN_MENU
     
     elif query.data == 'settings_menu':
         await query.edit_message_text("⚙️ لوحة الإعدادات:", reply_markup=get_settings_menu_keyboard())
         return SETTINGS_MENU
 
     # --- Edit Menu Logic ---
+    elif query.data == 'edit_text_title':
+        await query.edit_message_text("⚠️ تعديل عنوان النص غير مدعوم حاليا. (وظيفة تحت التطوير)")
+        return EDIT_MENU
+        
     elif query.data == 'edit_text_content':
         await query.edit_message_text("الرجاء إرسال معرف النص الذي تريد تعديل محتواه:")
         return EDIT_CONTENT_PROMPT
     
+    elif query.data == 'edit_post_prompt':
+        await query.edit_message_text("⚠️ تعديل المنشورات غير مدعوم حاليا. (وظيفة تحت التطوير)")
+        return EDIT_MENU
+
     # --- Schedule Menu Logic ---
     elif query.data == 'schedule_hour':
-        await query.edit_message_text("✅ تم جدولة النشر بعد ساعة من الآن.")
+        await query.edit_message_text("✅ تم جدولة النشر بعد ساعة من الآن. (وظيفة تحت التطوير)")
+        return MAIN_MENU
         
     elif query.data == 'schedule_day':
-        await query.edit_message_text("✅ تم جدولة النشر بعد يوم من الآن.")
+        await query.edit_message_text("✅ تم جدولة النشر بعد يوم من الآن. (وظيفة تحت التطوير)")
+        return MAIN_MENU
 
     elif query.data == 'schedule_custom':
         await query.edit_message_text("الرجاء إرسال الوقت المخصص للجدولة (مثال: 2024-12-31 23:59):")
         return SCHEDULE_CUSTOM_PROMPT
 
     # --- Settings Menu Logic ---
+    elif query.data == 'notifications_menu':
+        await query.edit_message_text("⚠️ إعدادات الإشعارات غير مدعومة حاليا. (وظيفة تحت التطوير)")
+        return SETTINGS_MENU
+
+    elif query.data == 'channels_menu':
+        await query.edit_message_text("⚠️ إعدادات القنوات المربوطة غير مدعومة حاليا. (وظيفة تحت التطوير)")
+        return SETTINGS_MENU
+
+    elif query.data == 'messages_menu':
+        await query.edit_message_text("⚠️ إعدادات الرسائل غير مدعومة حاليا. (وظيفة تحت التطوير)")
+        return SETTINGS_MENU
+
+    elif query.data == 'rights_menu':
+        await query.edit_message_text("⚠️ إعدادات الحقوق غير مدعومة حاليا. (وظيفة تحت التطوير)")
+        return SETTINGS_MENU
+
     elif query.data == 'toggle_protection':
         bot_config['protection_enabled'] = not bot_config['protection_enabled']
         await query.edit_message_text(f"حماية البوت الآن: {'✅ مفعل' if bot_config['protection_enabled'] else '❌ غير مفعل'}", reply_markup=get_settings_menu_keyboard())
+        return SETTINGS_MENU
+    
     elif query.data == 'toggle_auto_reply':
         bot_config['auto_reply_enabled'] = not bot_config['auto_reply_enabled']
-        await query.edit_message_text(f"الرد التلقائي الآن: {'✅ مفعل' if bot_config['auto_reply_enabled'] else '❌ غير مفعل'}", reply_markup=get_settings_menu_keyboard())
+        if bot_config['auto_reply_enabled']:
+            await query.edit_message_text("✅ تم تفعيل الرد التلقائي. (رسائل المستخدمين لن تصل إلى المدير مباشرة)", reply_markup=get_settings_menu_keyboard())
+        else:
+            await query.edit_message_text("❌ تم تعطيل الرد التلقائي. (سيتم إعادة توجيه رسائل المستخدمين للمدير)", reply_markup=get_settings_menu_keyboard())
+        return SETTINGS_MENU
+
     elif query.data == 'clear_users_cache':
         user_data.clear()
         await query.edit_message_text("✅ تم مسح الذاكرة المؤقتة لجميع المستخدمين.", reply_markup=get_settings_menu_keyboard())
+        return SETTINGS_MENU
+
     elif query.data == 'clear_user_cache_prompt':
         await query.edit_message_text("الرجاء إرسال معرف المستخدم الذي تريد مسح بياناته:")
         return CLEAR_USER_PROMPT
@@ -320,7 +421,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             await update.message.reply_text("حدث خطأ أثناء معالجة طلبك.")
     else:
-        await update.message.reply_text(bot_config['welcome_message'])
+        # إذا كان الرد التلقائي غير مفعل، يتم إعادة توجيه الرسالة
+        await forward_user_message_to_manager(update, context)
 
 async def handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -329,10 +431,12 @@ async def handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN or not MANAGER_ID:
+        LOGGER.error("TELEGRAM_BOT_TOKEN or MANAGER_ID environment variables are not set. Exiting.")
         return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # Conversation handler for manager's menu
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
@@ -350,13 +454,21 @@ def main() -> None:
 
     application.add_handler(conv_handler)
     
+    # Message handler for non-manager users when auto-reply is on or off
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(user_id=~MANAGER_ID),
         handle_user_message
     ))
+    # Message handler for media from non-manager users
     application.add_handler(MessageHandler(
         (filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ATTACHMENT) & filters.User(user_id=~MANAGER_ID),
         handle_user_media
+    ))
+    
+    # Handler for manager's replies (this is how the bot knows to forward the reply)
+    application.add_handler(MessageHandler(
+        filters.REPLY & filters.User(user_id=MANAGER_ID),
+        handle_manager_reply
     ))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
