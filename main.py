@@ -16,6 +16,7 @@ from telegram.ext import (
 from collections import defaultdict
 import datetime
 import pytz
+from flask import Flask, request
 
 # Enable logging
 logging.basicConfig(
@@ -28,6 +29,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 MANAGER_ID = int(os.environ.get("MANAGER_ID", 0))
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002061234567")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+PORT = int(os.environ.get("PORT", 5000)) # Port for the web server
 
 # ConversationHandler states
 MAIN_MENU, EDIT_MENU, SCHEDULE_MENU, SETTINGS_MENU, \
@@ -112,13 +114,10 @@ def get_add_again_keyboard(add_type):
         ])
 
 # --- Functions ---
-
-# وظيفة لإعادة توجيه رسائل المستخدمين للمدير
 async def forward_user_message_to_manager(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_name = update.effective_user.full_name
     
-    # Store user data for reply functionality
     user_data[MANAGER_ID]['current_user_id'] = user_id
     
     forward_message_text = (
@@ -126,31 +125,25 @@ async def forward_user_message_to_manager(update: Update, context: ContextTypes.
         f"{update.message.text}"
     )
 
-    # إرسال الرسالة إلى المدير مع خيار الرد المباشر
     await context.bot.send_message(
         chat_id=MANAGER_ID,
         text=forward_message_text,
         reply_markup=ForceReply(selective=True)
     )
     
-    # إرسال رسالة ترحيب للمستخدم
     await update.message.reply_text(bot_config['welcome_message'])
 
-# وظيفة للرد على رسائل المستخدمين من قبل المدير
 async def handle_manager_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # التحقق من أن المستخدم الذي يرد هو المدير
     if update.effective_user.id != MANAGER_ID:
         return
         
     reply_text = update.message.text
-    # الحصول على معرف المستخدم الذي يتم الرد عليه
     target_user_id = user_data[MANAGER_ID].get('current_user_id')
     
     if target_user_id:
         try:
             await context.bot.send_message(chat_id=target_user_id, text=reply_text)
             await update.message.reply_text("✅ تم إرسال الرد بنجاح إلى المستخدم.")
-            # مسح البيانات بعد الرد
             del user_data[MANAGER_ID]['current_user_id']
         except Exception as e:
             await update.message.reply_text("❌ فشل إرسال الرد، ربما قام المستخدم بحظر البوت.")
@@ -177,10 +170,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return MAIN_MENU
     else:
         user_count.add(user.id)
-        # إذا لم يكن الرد التلقائي مفعلا، يتم إعادة توجيه الرسالة
         if not bot_config['auto_reply_enabled']:
             return ConversationHandler.END
-        # وإلا، يتم إرسال رسالة ترحيب
         await update.message.reply_text(bot_config['welcome_message'])
         return ConversationHandler.END
 
@@ -197,7 +188,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return MAIN_MENU
     
-    # --- Add again handlers ---
     elif query.data == 'add_text_again':
         await query.edit_message_text("الرجاء إرسال النص الذي تريد إضافته:")
         return ADD_TEXT
@@ -205,7 +195,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("الرجاء إرسال المنشور (صورة، فيديو، نص) الذي تريد إضافته:")
         return ADD_POST
     
-    # --- Main Menu Handlers ---
     elif query.data == 'publish_now':
         if not posts and not texts:
             await query.edit_message_text("لا توجد منشورات أو نصوص متاحة للنشر.")
@@ -264,7 +253,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("⚙️ لوحة الإعدادات:", reply_markup=get_settings_menu_keyboard())
         return SETTINGS_MENU
 
-    # --- Edit Menu Logic ---
     elif query.data == 'edit_text_title':
         await query.edit_message_text("⚠️ تعديل عنوان النص غير مدعوم حاليا. (وظيفة تحت التطوير)")
         return EDIT_MENU
@@ -277,7 +265,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("⚠️ تعديل المنشورات غير مدعوم حاليا. (وظيفة تحت التطوير)")
         return EDIT_MENU
 
-    # --- Schedule Menu Logic ---
     elif query.data == 'schedule_hour':
         await query.edit_message_text("✅ تم جدولة النشر بعد ساعة من الآن. (وظيفة تحت التطوير)")
         return MAIN_MENU
@@ -290,7 +277,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("الرجاء إرسال الوقت المخصص للجدولة (مثال: 2024-12-31 23:59):")
         return SCHEDULE_CUSTOM_PROMPT
 
-    # --- Settings Menu Logic ---
     elif query.data == 'notifications_menu':
         await query.edit_message_text("⚠️ إعدادات الإشعارات غير مدعومة حاليا. (وظيفة تحت التطوير)")
         return SETTINGS_MENU
@@ -421,7 +407,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             await update.message.reply_text("حدث خطأ أثناء معالجة طلبك.")
     else:
-        # إذا كان الرد التلقائي غير مفعل، يتم إعادة توجيه الرسالة
         await forward_user_message_to_manager(update, context)
 
 async def handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -436,7 +421,6 @@ def main() -> None:
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Conversation handler for manager's menu
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
@@ -454,24 +438,39 @@ def main() -> None:
 
     application.add_handler(conv_handler)
     
-    # Message handler for non-manager users when auto-reply is on or off
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(user_id=~MANAGER_ID),
         handle_user_message
     ))
-    # Message handler for media from non-manager users
     application.add_handler(MessageHandler(
         (filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.ATTACHMENT) & filters.User(user_id=~MANAGER_ID),
         handle_user_media
     ))
     
-    # Handler for manager's replies (this is how the bot knows to forward the reply)
     application.add_handler(MessageHandler(
         filters.REPLY & filters.User(user_id=MANAGER_ID),
         handle_manager_reply
     ))
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Webhook handler
+    app = Flask(__name__)
+    @app.route("/")
+    def index():
+        return "Hello World!"
+        
+    @app.route("/webhook", methods=["POST"])
+    def webhook_handler():
+        """Handle incoming updates from Telegram"""
+        try:
+            update = Update.de_json(request.get_json(force=True), application.bot)
+            application.process_update(update)
+            return "ok"
+        except Exception as e:
+            LOGGER.error("Failed to process update: %s", e)
+            return "error", 500
+
+    # The Flask app is started here
+    app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()
