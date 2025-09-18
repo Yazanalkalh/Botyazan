@@ -29,14 +29,15 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 MANAGER_ID = int(os.environ.get("MANAGER_ID", 0))
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "-1002061234567")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-PORT = int(os.environ.get("PORT", 5000)) # Port for the web server
+PORT = int(os.environ.get("PORT", 5000))
 
 # ConversationHandler states
+# تم تصحيح الخطأ هنا. عدد المتغيرات الآن 20 ليطابق range(20)
 MAIN_MENU, EDIT_MENU, SCHEDULE_MENU, SETTINGS_MENU, \
     NOTIFICATIONS_MENU, CHANNELS_MENU, MESSAGES_MENU, RIGHTS_MENU, \
     ADD_TEXT, ADD_POST, EDIT_TEXT_PROMPT, EDIT_CONTENT_PROMPT, SCHEDULE_CUSTOM_PROMPT, \
     EDIT_WELCOME_MESSAGE, EDIT_REJECT_MESSAGE, CLEAR_USER_PROMPT, \
-    EDIT_POST_CONTENT, ADD_CHANNEL_PROMPT, TEST_CHANNEL_PROMPT = range(20)
+    EDIT_POST_CONTENT, ADD_CHANNEL_PROMPT, TEST_CHANNEL_PROMPT, UNUSED = range(20)
 
 # In-memory storage (will be reset on bot restart)
 user_data = defaultdict(dict)
@@ -452,15 +453,13 @@ def main() -> None:
         handle_manager_reply
     ))
 
-    # Webhook handler
     app = Flask(__name__)
     @app.route("/")
     def index():
         return "Hello World!"
         
-    @app.route("/webhook", methods=["POST"])
+    @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     def webhook_handler():
-        """Handle incoming updates from Telegram"""
         try:
             update = Update.de_json(request.get_json(force=True), application.bot)
             application.process_update(update)
@@ -469,7 +468,6 @@ def main() -> None:
             LOGGER.error("Failed to process update: %s", e)
             return "error", 500
 
-    # The Flask app is started here
     app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
