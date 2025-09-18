@@ -1,3 +1,9 @@
-python-telegram-bot
-python-dotenv
+aiogram==2.25.2
+aiohttp<3.9.0
+charset-normalizer<3.0
+Flask==2.2.2
+Werkzeug==2.2.3
+hijri-converter==2.3.1
 pytz
+pymongo
+dnspython
